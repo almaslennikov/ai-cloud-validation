@@ -85,6 +85,10 @@
 #   - Expected machines pre-registered; machines ingested and DPUs initialized
 #   - NICO_ORGANIZATION and NICO_SITE_ID environment variables set
 #   - Optional NICO_INSTANCE_ID narrows inventory checks to a known instance
+#   - Optional NICO_HEALTH_AGENT_NODES lists the SSH-reachable GPU nodes to
+#     inspect for GPUd/NVSentinel (BFX04-01); unset skips that check. The list
+#     must name every GPU node the site has -- the fleet size is counted from
+#     query_fleet_inventory, so a partial list fails rather than passing
 #   - ssh-keygen on the host (used by query_key_access to mint the throwaway key)
 #
 # Usage:
@@ -408,10 +412,13 @@ commands:
           - "{{nico_api_base}}"
         timeout: 120
 
+      # Reads Tray.firmwareVersion from NICo. get-all-tray is PROVIDER_ADMIN
+      # only, so provider credentials pass and tenant credentials skip naming
+      # the gap -- the tenant-visible half of BFX03-02 is the part NICo lacks.
       - name: query_switch_firmware
         phase: test
         continue_on_failure: true
-        command: "python ../scripts/breakfix/gap_stub.py"
+        command: "python ../scripts/breakfix/query_switch_firmware.py"
         args:
           - "--org"
           - "{{org}}"
@@ -419,8 +426,6 @@ commands:
           - "{{site_id}}"
           - "--api-base"
           - "{{nico_api_base}}"
-          - "--gap"
-          - "BFX03-02"
         timeout: 120
 
       - name: query_bmc_kernel_logs
@@ -436,10 +441,19 @@ commands:
           - "{{nico_api_base}}"
         timeout: 120
 
-      - name: return_node_maintenance
+      # Reports a node for repair via NICo online repair and watches the assigned
+      # instance move Ready -> Repairing -> Ready. Online repair is cleared in a
+      # finally, so a node cannot be stranded out of the pool. Skips when the site
+      # has no machine with a Ready instance.
+      #
+      # Skips by default even when a target exists: it names the node it would use
+      # and waits for the operator to confirm, because a shared site's only tenant
+      # instance may not be ours. Allow it with NICO_ALLOW_ONLINE_REPAIR=1, or add
+      # --machine-id <id> here to pin a node you own.
+      - name: report_node_repair
         phase: test
         continue_on_failure: true
-        command: "python ../scripts/breakfix/gap_stub.py"
+        command: "python ../scripts/breakfix/report_node_repair.py"
         args:
           - "--org"
           - "{{org}}"
@@ -447,9 +461,29 @@ commands:
           - "{{site_id}}"
           - "--api-base"
           - "{{nico_api_base}}"
-          - "--gap"
-          - "BFX01-02"
-        timeout: 600
+        timeout: 900
+
+      # Relinquishes an instance via NICo release-for-repair (DELETE instance +
+      # machineHealthIssue) and watches the machine leave the allocatable pool.
+      #
+      # Irreversible, so it never picks its own target: it skips unless
+      # NICO_INSTANCE_ID names the instance to destroy AND
+      # NICO_ALLOW_RELEASE_FOR_REPAIR=1 is set. Two separate env vars, so
+      # neither alone arms it, and a plain run reports what it would destroy
+      # and stops.
+      - name: return_node_maintenance
+        phase: test
+        continue_on_failure: true
+        command: "python ../scripts/breakfix/return_node_maintenance.py"
+        args:
+          - "--org"
+          - "{{org}}"
+          - "--site-id"
+          - "{{site_id}}"
+          - "--api-base"
+          - "{{nico_api_base}}"
+          - "--instance-id={{instance_id}}"
+        timeout: 900
 
       - name: return_rack_maintenance
         phase: test
@@ -481,20 +515,25 @@ commands:
           - "BFX01-05"
         timeout: 900
 
+      # ─── Query Node Health Agents ──────────────────────────────────
+      # NICo's REST surface does not report GPUd/NVSentinel state, so
+      # BFX04-01 is evidenced by inspecting the agents' systemd units on
+      # the nodes directly. Skips while NICO_HEALTH_AGENT_NODES is unset.
+      #
+      # The fleet size comes from query_fleet_inventory rather than from the
+      # node list, so a hand-written list covering part of the site fails
+      # instead of carrying BFX04-01 for all of it. Counting only machines
+      # with GPUs keeps the comparison against the nodes actually at issue.
       - name: query_node_health_agents
         phase: test
         continue_on_failure: true
-        command: "python ../scripts/breakfix/gap_stub.py"
+        command: "python ../../shared/breakfix/query_node_health_agents.py"
         args:
-          - "--org"
-          - "{{org}}"
-          - "--site-id"
-          - "{{site_id}}"
-          - "--api-base"
-          - "{{nico_api_base}}"
-          - "--gap"
-          - "BFX04-01"
-        timeout: 120
+          - "--nodes={{health_agent_nodes}}"
+          - "--expected-nodes={{steps.query_fleet_inventory.nodes | selectattr('gpu_count', 'greaterthan', 0) | list | length}}"
+        requires_available_validations:
+          - NodeHealthAgentCheck
+        timeout: 300
 
       - name: query_planned_notifications
         phase: test
@@ -592,6 +631,7 @@ tests:
     site_id: "{{env.NICO_SITE_ID}}"
     nico_api_base: "{{env.NICO_API_BASE}}"
     instance_id: "{{env.NICO_INSTANCE_ID}}"
+    health_agent_nodes: "{{env.NICO_HEALTH_AGENT_NODES | default('', true)}}"
     # The imported bare_metal suite defines these for the full instance
     # lifecycle, which NICo does not run yet. Blank them so the suite's
     # {{instance_type}} self-reference does not emit missing-variable warnings.

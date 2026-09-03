@@ -75,7 +75,11 @@ Suites:
 [`slurm`](slurm.yaml),
 [`control-plane`](control-plane.yaml),
 [`image-registry`](image-registry.yaml),
-[`security`](security.yaml).
+[`security`](security.yaml),
+[`network-operator`](k8s-launch-kit/network-operator.yaml).
+The Network Operator Launch Kit integration is unreleased; see the
+[Launch Kit integration guide](../../../docs/guides/k8s-launch-kit/network-operator.md)
+before running its cluster-mutating workflows.
 For the domain / script-count / AWS-reference overview see the
 [my-isv scaffold README](../providers/my-isv/scripts/README.md#domains).
 
@@ -108,6 +112,11 @@ runs against the group's step output as a subtest, so a failure still names the
 part that broke, and every member runs even after an earlier one fails. A member
 that needs parameters takes them inline (`- CheckName: {...}`); one that does
 not stays a single line.
+
+If a member reports its own subtests, the composite forwards them as
+`MemberName/probe-name`. Successful parents are summarized automatically by
+subtest count in `isvctl` output; failures retain their complete diagnostic
+message. This is shared renderer behavior, not a suite option.
 
 Because a composite has no validation class to borrow from, it declares its own
 `description` (the catalog uses it) and its name must not shadow a class name. A
@@ -207,6 +216,72 @@ its plan item is not platform-scoped.
 | `switch_syslogs` | test | `providers/my-isv/scripts/observability/log_availability_test.py` | `tests.*.probes.switches_checked`, `log_source`, `entry_count`, `latest_timestamp` |
 | `switch_kernel_logs` | test | `providers/my-isv/scripts/observability/log_availability_test.py` | `tests.*.probes.switches_checked`, `log_source`, `entry_count`, `latest_timestamp` |
 
+### Network Operator (`k8s-launch-kit/network-operator.yaml`)
+
+Plain suite for Kubernetes Launch Kit Network Operator self-validation. The
+generic provider in `providers/k8s-launch-kit/config/provider.yaml` mirrors the real CLI as
+separate verify, prerequisite, discover, generate, deploy, and validate steps.
+It forwards user-supplied argument arrays and does not own Network Operator,
+profile, topology, resource, or validation defaults. The suite binds fifteen
+checks (one prerequisite plus fourteen currently supported PRD areas) directly
+to the command output that proves them.
+
+GPUDirect RDMA is registered from Launch Kit's `gpudirect_dmabuf` result family;
+the check skips when that family is disabled or not selected and fails on
+emitted GPU topology or bandwidth errors. State restoration remains deferred
+until Launch Kit provides the required snapshot/restore/verify workflow.
+
+The same suite reuses those global check classes in six separate composite
+tests: RoCE and InfiniBand across SR-IOV, RDMA Shared, and host-device
+deployment modes. Keeping both forms in one file exposes one frontend suite,
+`network_operator`, rather than a second implementation-detail suite. Each
+composite includes only checks applicable to that use case, so unrelated
+fabric/deployment checks do not appear as skips in the middle of a run. The
+Ethernet/RoCE composites carry `ethernet` and `roce`; the InfiniBand composites
+carry `infiniband`. All six also carry `gpudirect` because Launch Kit discovery
+decides whether the GPUDirect family is applicable.
+
+`providers/k8s-launch-kit/config/network-operator.yaml` is the production
+entrypoint. It uses `l8k` and `kubectl` from `PATH` by default. In one invocation
+it runs `launch_kit_prepare` in `setup`, `launch_kit_verify` in
+`launch-kit-verification`, then executes the six use-case phases sequentially,
+each with its own preflight, discover, generate, validate, and evidence
+directories. The phases are
+independent, so a failed case records a failed overall run but does not prevent
+later cases from producing results. Mock executables exist only under
+`isvctl/tests/providers/k8s_launch_kit/fixtures/` and are injected by tests.
+
+```bash
+ISVTEST_INCLUDE_UNRELEASED=1 uv run isvctl test run \
+  -f isvctl/configs/providers/k8s-launch-kit/config/network-operator.yaml \
+  --capability kubernetes --no-upload -- -v
+```
+
+Add `--label ethernet` or `--label infiniband` before `--no-upload` to run only
+that fabric's three workflows. Their steps use
+`requires_selected_validations`, so the other fabric's mutating commands are
+pruned before execution. Use `--label sriov`, `--label rdma_shared`, or
+`--label host_device` to run the matching two-fabric deployment mode. Labels
+compose, so `--label ethernet --label sriov` selects one use case. Omitting
+labels runs all six.
+
+| Step | Phase | Script | Key JSON Fields |
+|------|-------|--------|-----------------|
+| `launch_kit_prepare` | setup | `providers/k8s-launch-kit/scripts/adapter.py prepare` | `installed`, `executable`, `checks.{version,schema}`, `artifacts` |
+| `launch_kit_verify` | test | `providers/k8s-launch-kit/scripts/adapter.py verify` | `executable`, `checks.{version,schema}`, `artifacts` |
+| `launch_kit_kubernetes_preflight` | test | `providers/k8s-launch-kit/scripts/adapter.py preflight` | `server_version`, `node_count`, `ready_node_count`, `checks`, `artifacts` |
+| `launch_kit_discover` | test | `providers/k8s-launch-kit/scripts/adapter.py run` -> `l8k discover` | raw `documents`, `argv`, `exit_code`, `artifacts` |
+| `launch_kit_generate` | test | `providers/k8s-launch-kit/scripts/adapter.py run` -> `l8k generate` | raw `documents`, `argv`, `exit_code`, `artifacts` |
+| `launch_kit_deploy` | test | `providers/k8s-launch-kit/scripts/adapter.py run` -> `l8k deploy` | raw `documents` (currently empty on success), `argv`, `exit_code`, `artifacts` |
+| `launch_kit_validate` | test | `providers/k8s-launch-kit/scripts/adapter.py run` -> `l8k validate` | raw static, connectivity, and report-path `documents`, `argv`, `exit_code`, `artifacts` |
+
+Those are the generic provider's single-workflow names. The grouped production
+configuration performs prepare in `setup` and verify in
+`launch-kit-verification`, then repeats preflight, discover, generate, and
+validate under each custom use-case phase with names such as
+`launch_kit_roce_sriov_preflight` through
+`launch_kit_roce_sriov_validate`.
+
 ### VM (`vm.yaml`)
 
 | Step | Phase | Script | Key JSON Fields |
@@ -263,14 +338,15 @@ its plan item is not platform-scoped.
 | `query_maintenance_events` | test | `providers/nico/scripts/breakfix/query_maintenance_events.py` | `events_queryable`, `events[].{machine_id,status,message}` (BFX02-01) |
 | `query_retirement_notices` | test | `providers/my-isv/scripts/breakfix/query_retirement_notices.py` | `notices_queryable`, `notices` (BFX02-02) |
 | `query_repair_history` | test | `providers/nico/scripts/breakfix/query_repair_history.py` | `history_queryable`, `records[].{machine_id,entries}` -- a record needs non-empty `entries` to count (BFX02-03) |
-| `query_switch_firmware` | test | `providers/my-isv/scripts/breakfix/query_switch_firmware.py` | `trays[].{tray_id,firmware_version}` (BFX03-02) |
-| `query_bmc_kernel_logs` | test | `providers/nico/scripts/breakfix/query_bmc_kernel_logs.py` | `hosts[].{host_id,kernel_log_available}` (BFX03-03) |
-| `return_node_maintenance` | test | `providers/my-isv/scripts/breakfix/return_node_maintenance.py` | `operation.{requested,accepted,machine_id,maintenance_mode}` (BFX01-02) |
+| `query_switch_firmware` | test | `providers/nico/scripts/breakfix/query_switch_firmware.py` | `trays[].{tray_id,firmware_version}` -- reads `Tray.firmwareVersion`; `get-all-tray` is `PROVIDER_ADMIN`-only, so tenant credentials skip naming the gap rather than failing (BFX03-02) |
+| `query_bmc_kernel_logs` | test | `providers/nico/scripts/breakfix/query_bmc_kernel_logs.py` | `hosts[].{host_id,window_start,window_end,entries_returned}` -- a windowed query that returns entries, not a "logs available" boolean (BFX03-03) |
+| `report_node_repair` | test | `providers/nico/scripts/breakfix/report_node_repair.py` | `operation.{requested,repair_state_observed,restored,node_id}` -- reports a node as needing repair while keeping it, and watches the node enter a repair state (BFX01-06) |
+| `return_node_maintenance` | test | `providers/nico/scripts/breakfix/return_node_maintenance.py` | `operation.{requested,accepted,instance_deleted,machine_quarantined,instance_id,machine_id}` -- relinquishes the instance and verifies the machine is held for repair rather than returned to the pool; irreversible, so it skips unless an instance is named *and* `NICO_ALLOW_RELEASE_FOR_REPAIR=1` (BFX01-02) |
 | `return_rack_maintenance` | test | `providers/my-isv/scripts/breakfix/return_rack_maintenance.py` | `operation.{requested,accepted,rack_id}` (BFX01-03) |
 | `request_host_replacement` | test | `providers/my-isv/scripts/breakfix/request_host_replacement.py` | `operation.{requested,node_removed_from_pool,machine_id}` (BFX01-05) |
-| `query_node_health_agents` | test | `providers/my-isv/scripts/breakfix/query_node_health_agents.py` | `agents_observable`, `agents[].{node_id,agent_name,running}` (BFX04-01) |
-| `query_planned_notifications` | test | `providers/my-isv/scripts/breakfix/query_planned_notifications.py` | `notification_channel_observable`, `notifications[].{machine_id,type,message,notified_at}` (BFX05-01) |
-| `query_failure_notifications` | test | `providers/my-isv/scripts/breakfix/query_failure_notifications.py` | `notification_channel_observable`, `notifications[].{machine_id,type,message,notified_at}` (BFX06-01) |
+| `query_node_health_agents` | test | `providers/shared/breakfix/query_node_health_agents.py` | `agents_observable`, `nodes_expected`, `agents[].{node_id,agent_name,running}` -- SSH `systemctl` probe. Any name is accepted, but a `running` record must supply one; the check matches no specific product, and a fleet running another agent names its units with `--units` rather than editing the shared script. List every GPU node, marking uncovered ones `running: false` rather than omitting them; `nodes_expected` is the platform's GPU node count and must come from inventory rather than from the list itself, since the check fails when the records do not cover it; skip when no GPU nodes are configured (BFX04-01) |
+| `query_planned_notifications` | test | `providers/my-isv/scripts/breakfix/query_planned_notifications.py` | `notification_channel_observable`, `notifications[].{machine_id,type,message,notified_at,window_start}` -- `notified_at` must precede `window_start` (the lead time) (BFX05-01) |
+| `query_failure_notifications` | test | `providers/my-isv/scripts/breakfix/query_failure_notifications.py` | `notification_channel_observable`, `notifications[].{machine_id,type,message,detected_at,notified_at}` -- `detected_at` to `notified_at` is the latency (BFX06-01) |
 
 ### Storage (`storage.yaml`)
 
@@ -296,10 +372,12 @@ volume. The three test-phase steps all reuse that fixture.
 |------|-------|--------|
 | `setup` | setup | `providers/my-isv/scripts/k8s/setup.sh` |
 | `teardown` | teardown | `providers/my-isv/scripts/k8s/teardown.sh` |
-| `reset_gpus` | test | `providers/my-isv/scripts/breakfix/reset_gpus.py` (BFX01-01) |
-| `cordon_node` | test | `providers/my-isv/scripts/breakfix/cordon_node.py` (BFX01-04) |
+| `reset_gpus` | test | `providers/my-isv/scripts/breakfix/reset_gpus.py` -- `operation.{accepted,node_id,gpu_ids,request_id}`; the reset is asynchronous, so the step reports acceptance plus a handle to poll (BFX01-01) |
+| `cordon_node` | test | `providers/shared/breakfix/cordon_node.py` (BFX01-04) |
 
 Validations use `kubectl` directly (or a custom CLI via the `KUBECTL` env var): node counts, GPU operator, pod health, NCCL/NIM workloads. Break-fix cordon and GPU reset are optional provider steps.
+The shared cordon reference skips without changing cluster state unless
+`tests.settings.breakfix_node` names a dedicated test node.
 
 ### Slurm (`slurm.yaml`)
 
