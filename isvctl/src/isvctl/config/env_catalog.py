@@ -126,17 +126,24 @@ ENV_VARS: tuple[EnvVar, ...] = (
         persistable=False,
     ),
     EnvVar(
-        "ISVTEST_INCLUDE_UNRELEASED",
-        "Flags",
-        Requirement.OPTIONAL,
-        "include unreleased validations",
-        persistable=False,
-    ),
-    EnvVar(
         "AWS_SKIP_TEARDOWN",
         "Flags",
         Requirement.OPTIONAL,
         "skip AWS teardown phase",
+        persistable=False,
+    ),
+    EnvVar(
+        "NICO_ALLOW_ONLINE_REPAIR",
+        "Flags",
+        Requirement.OPTIONAL,
+        "allow BFX01-06 to move an auto-selected NICo node into repair",
+        persistable=False,
+    ),
+    EnvVar(
+        "NICO_ALLOW_RELEASE_FOR_REPAIR",
+        "Flags",
+        Requirement.OPTIONAL,
+        "allow BFX01-02 to delete the named NICo instance (irreversible)",
         persistable=False,
     ),
     # NICo — optional by default; --provider nico runs strict provider-specific
