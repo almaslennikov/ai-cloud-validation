@@ -95,6 +95,19 @@ def test_wiring_errors_reports_yaml_parse_failures(tmp_path: Path) -> None:
     assert "failed to read/parse" in errors[0]
 
 
+def test_wiring_errors_scans_nested_suite_directories(tmp_path: Path) -> None:
+    """Domain-organized suites receive the same metadata guardrails as root suites."""
+    nested = tmp_path / "launch-kit"
+    nested.mkdir()
+    (nested / "network-operator.yaml").write_text(
+        "tests:\n  validations:\n    sample:\n      checks:\n        MissingMetadata: {}\n"
+    )
+
+    errors = validate_suite_wiring.wiring_errors(tmp_path)
+
+    assert any("launch-kit/network-operator.yaml" in error and "MissingMetadata" in error for error in errors)
+
+
 def test_find_check_line_numbers_supports_list_form() -> None:
     """List-form wiring reports each repeated check at its own line."""
     lines = """
@@ -459,5 +472,15 @@ tests:
             - StepSuccessCheck
 """
     )
+
+    assert validate_suite_wiring.provider_wiring_errors(providers) == []
+
+
+def test_provider_wiring_errors_ignores_terraform_module_cache(tmp_path: Path) -> None:
+    """Local terraform init drops multi-document YAML under .terraform/; that is not config."""
+    providers = tmp_path / "providers"
+    cached = providers / "aws" / ".terraform" / "modules"
+    cached.mkdir(parents=True)
+    (cached / "karpenter.yaml").write_text("a: 1\n---\nb: 2\n")
 
     assert validate_suite_wiring.provider_wiring_errors(providers) == []
